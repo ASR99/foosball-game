@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Foosball Multiplayer</title>
+
+<style>
+  body{margin:0;background:#000;overflow:hidden}
+  canvas{display:block}
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+
+<!-- Socket.IO -->
+<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+
+<script>
+// ================= SERVER =================
+const SERVER_URL = "https://YOUR-SERVER.onrender.com"; // 🔴 CHANGE THIS
+
+let socket = null;
+let playerId = null;
+
+// ================= CONNECT =================
+function connectOnline(){
+  socket = io(SERVER_URL);
+
+  socket.on('connect', ()=>{
+    console.log("Connected to server");
+  });
+
+  socket.on('start', data=>{
+    playerId = data.player;
+    console.log("You are player", playerId);
+    startGame();
+  });
+
+  socket.on('input', data=>{
+    applyRemoteInput(data);
+  });
+
+  socket.on('opponent_left', ()=>{
+    alert("Opponent disconnected");
+    location.reload();
+  });
+}
+
+// ================= GAME =================
+const C=document.getElementById('c'),ctx=C.getContext('2d');
+let ball={x:200,y:200,vx:3,vy:2};
+let paddle1=200,paddle2=200;
+
+function startGame(){
+  requestAnimationFrame(loop);
+}
+
+function loop(){
+  ctx.fillStyle="black";
+  ctx.fillRect(0,0,innerWidth,innerHeight);
+
+  // Move ball
+  ball.x+=ball.vx;
+  ball.y+=ball.vy;
+
+  if(ball.y<0||ball.y>innerHeight) ball.vy*=-1;
+
+  // Draw ball
+  ctx.fillStyle="white";
+  ctx.beginPath();
+  ctx.arc(ball.x,ball.y,10,0,Math.PI*2);
+  ctx.fill();
+
+  // Draw paddles
+  ctx.fillRect(20,paddle1,10,80);
+  ctx.fillRect(innerWidth-30,paddle2,10,80);
+
+  requestAnimationFrame(loop);
+}
+
+// ================= INPUT =================
+document.addEventListener('keydown',e=>{
+  let action=null;
+
+  if(e.key==="w"){ paddle1-=20; action={type:'move',team:0,dir:-1}; }
+  if(e.key==="s"){ paddle1+=20; action={type:'move',team:0,dir:1}; }
+
+  if(action && socket){
+    socket.emit('input', action);
+  }
+});
+
+// ================= REMOTE =================
+function applyRemoteInput(data){
+  if(data.team===1){
+    paddle2 += data.dir*20;
+  }
+}
+
+// ================= START =================
+connectOnline();
+
+</script>
+</body>
+</html>
