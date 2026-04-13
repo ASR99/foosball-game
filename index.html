@@ -2,106 +2,548 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Foosball Multiplayer</title>
-
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Foosball</title>
 <style>
-  body{margin:0;background:#000;overflow:hidden}
-  canvas{display:block}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#000;overflow:hidden;touch-action:none}
+  canvas{display:block;touch-action:none}
 </style>
 </head>
 <body>
-
 <canvas id="c"></canvas>
-
-<!-- Socket.IO -->
-<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-
+<!-- Socket.IO from cdnjs -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.min.js"></script>
 <script>
-// ================= SERVER =================
-const SERVER_URL = "https://foosball-server.onrender.com";
-
-let socket = null;
-let playerId = null;
-
-// ================= CONNECT =================
-function connectOnline(){
-  socket = io(SERVER_URL);
-
-  socket.on('connect', ()=>{
-    console.log("Connected to server");
-  });
-
-  socket.on('start', data=>{
-    playerId = data.player;
-    console.log("You are player", playerId);
-    startGame();
-  });
-
-  socket.on('input', data=>{
-    applyRemoteInput(data);
-  });
-
-  socket.on('opponent_left', ()=>{
-    alert("Opponent disconnected");
-    location.reload();
-  });
-}
-
-// ================= GAME =================
+const SERVER_URL="https://foosball-server.onrender.com";
 const C=document.getElementById('c'),ctx=C.getContext('2d');
-let ball={x:200,y:200,vx:3,vy:2};
-let paddle1=200,paddle2=200;
+const LW=900,LH=520;
+let cW,cH,sc,ox,oy;
+function resize(){
+  cW=C.width=window.innerWidth;
+  cH=C.height=window.innerHeight;        // FIX #1: canvas must be sized!
+  sc=Math.min(cW/LW,cH/LH);
+  ox=(cW-LW*sc)/2;oy=(cH-LH*sc)/2;
+}
+resize();window.addEventListener('resize',resize);
+function s2l(sx,sy){return[(sx-ox)/sc,(sy-oy)/sc];}
 
-function startGame(){
-  requestAnimationFrame(loop);
+/* ───────────── Online ───────────── */
+let socket=null,myPid=null,onlineReady=false;
+function connectOnline(){
+  gst='waiting';socket=io(SERVER_URL);
+  socket.on('connect',()=>{roomCode=socket.id.slice(0,6).toUpperCase();});
+  socket.on('start',d=>{
+    myPid=d.player;   // 1 or 2
+    mode='online';
+    buildRods();
+    ball={x:LW/2,y:LH/2,vx:0,vy:0,spin:0};
+    score=[0,0];winner=-1;
+    releaseTeam=0;
+    if(myPid===1){gst='release';}  // P1 picks first
+    else{gst='release';}           // both see release screen; only releaseTeam acts
+  });
+  socket.on('rod_sync',d=>{
+    // Apply remote rod positions
+    rods.forEach(r=>{if(r.team===d.team)r.yOff=d.yOff[r.count];});
+    // Shortcut: sync by rod index
+    d.rods.forEach((yo,i)=>{if(rods[i])rods[i].yOff=yo;});
+  });
+  socket.on('release_pick',d=>{releaseBall(d.type,true);});
+  socket.on('goal_sync',d=>{
+    score=d.score;goalTeam=d.goalTeam;releaseTeam=d.releaseTeam;
+    goalAnim=120;gst='goal';
+  });
+  socket.on('ball_sync',d=>{
+    if(myPid===2){ball.x=d.x;ball.y=d.y;ball.vx=d.vx;ball.vy=d.vy;ball.spin=d.spin;}
+  });
+  socket.on('opponent_left',()=>{alert('Opponent disconnected!');location.reload();});
+}
+let roomCode='------',syncTick=0;
+
+/* ───────────── Table ───────────── */
+const T={x:75,y:65,w:750,h:390};
+const GH=128,GY=T.y+(T.h-GH)/2;
+const BR=10,FR=11;
+const COL=['#ff3333','#3399ff'],LGHT=['#ff7777','#66bbff'],DRK=['#990000','#004488'];
+const RC=[[55,0,1],[170,1,3],[290,0,2],[460,1,2],[580,0,3],[695,1,1]];
+
+/* ───────────── State ───────────── */
+let mode=null,gst='menu',score=[0,0],winner=-1;
+let ball={x:LW/2,y:LH/2,vx:0,vy:0,spin:0},rods=[];
+let goalAnim=0,goalTeam=-1,releaseTeam=0,aiTimer=0;
+const kCool=[0,0];
+const ts={p1up:false,p1dn:false,p1kk:false,p2up:false,p2dn:false,p2kk:false};
+const tMap={};const kd=new Set();
+
+function buildRods(){
+  rods=RC.map(([xr,tm,cnt])=>{
+    const x=T.x+xr,sp=T.h/(cnt+1);
+    return{x,team:tm,count:cnt,sp,yOff:0,min:-(sp-2),max:sp-2};
+  });
+}
+function getFigs(r){return Array.from({length:r.count},(_,i)=>({x:r.x,y:T.y+r.sp*(i+1)+r.yOff}));}
+function getBallColor(){
+  if(score[0]>score[1])return{c:COL[0],g1:LGHT[0],g2:DRK[0]};
+  if(score[1]>score[0])return{c:COL[1],g1:LGHT[1],g2:DRK[1]};
+  return{c:'#fff',g1:'#fff',g2:'#bbb'};
 }
 
-function loop(){
-  ctx.fillStyle="black";
-  ctx.fillRect(0,0,innerWidth,innerHeight);
-
-  // Move ball
-  ball.x+=ball.vx;
-  ball.y+=ball.vy;
-
-  if(ball.y<0||ball.y>innerHeight) ball.vy*=-1;
-
-  // Draw ball
-  ctx.fillStyle="white";
-  ctx.beginPath();
-  ctx.arc(ball.x,ball.y,10,0,Math.PI*2);
-  ctx.fill();
-
-  // Draw paddles
-  ctx.fillRect(20,paddle1,10,80);
-  ctx.fillRect(innerWidth-30,paddle2,10,80);
-
-  requestAnimationFrame(loop);
+function releaseBall(type,fromNet=false){
+  if(!fromNet&&mode==='online'){
+    socket.emit('release_pick',{type});
+  }
+  const dir=releaseTeam===0?1:-1;
+  ball.x=LW/2;ball.y=LH/2;ball.spin=0;
+  if(type==='fast'){ball.vx=dir*12;ball.vy=(Math.random()-.5)*2;}
+  else if(type==='slow'){ball.vx=dir*3;ball.vy=(Math.random()-.5)*2;}
+  else{ball.vx=dir*6;ball.vy=(Math.random()<.5?1:-1)*3.5;ball.spin=(Math.random()<.5?1:-1)*0.14;}
+  gst='playing';
 }
 
-// ================= INPUT =================
+function startGame(m){
+  if(m==='online'){connectOnline();return;}
+  mode=m;score=[0,0];winner=-1;buildRods();
+  ball={x:LW/2,y:LH/2,vx:0,vy:0,spin:0};
+  releaseTeam=0;aiTimer=150;gst='release';
+}
+
+/* ───────────── Physics ───────────── */
+function moveTeam(tm,dir){
+  rods.forEach(r=>{
+    if(r.team!==tm)return;
+    r.yOff=Math.max(r.min,Math.min(r.max,r.yOff+dir*4));
+  });
+}
+function capSpd(){const s=Math.hypot(ball.vx,ball.vy),M=17;if(s>M){ball.vx*=M/s;ball.vy*=M/s;}}
+function tryKick(tm){
+  if(kCool[tm]>0)return;
+  let bd=Infinity;
+  rods.forEach(r=>{if(r.team!==tm)return;getFigs(r).forEach(f=>{const d=Math.hypot(ball.x-f.x,ball.y-f.y);if(d<bd)bd=d;});});
+  if(bd<72){ball.vx=(tm===0?1:-1)*(9+Math.random()*3);ball.vy+=(Math.random()-.5)*6;capSpd();kCool[tm]=22;}
+}
+function aiUpdate(){
+  if(mode!=='1p')return;
+  rods.forEach(r=>{
+    if(r.team!==1)return;
+    const cf=getFigs(r).reduce((b,f)=>Math.abs(f.y-ball.y)<Math.abs(b.y-ball.y)?f:b);
+    if(cf.y<ball.y-4)r.yOff=Math.max(r.min,Math.min(r.max,r.yOff+3.2));
+    else if(cf.y>ball.y+4)r.yOff=Math.max(r.min,Math.min(r.max,r.yOff-3.2));
+  });
+  if(kCool[1]<=0)rods.forEach(r=>{if(r.team!==1)return;getFigs(r).forEach(f=>{if(Math.abs(ball.x-f.x)<28&&Math.abs(ball.y-f.y)<FR+BR+8)tryKick(1);});});
+}
+
+function handleInput(){
+  // In online mode, local player only controls their team
+  const myTeam=mode==='online'?(myPid===1?0:1):-1;
+  const canP1=mode!=='online'||myTeam===0;
+  const canP2=mode==='2p'||(mode==='online'&&myTeam===1);
+
+  if(canP1){
+    if(ts.p1up||kd.has('KeyW'))moveTeam(0,-1);
+    if(ts.p1dn||kd.has('KeyS'))moveTeam(0,1);
+    if(ts.p1kk||kd.has('Space'))tryKick(0);
+  }
+  if(canP2){
+    if(ts.p2up||kd.has('ArrowUp'))moveTeam(1,-1);
+    if(ts.p2dn||kd.has('ArrowDown'))moveTeam(1,1);
+    if(ts.p2kk||kd.has('Enter'))tryKick(1);
+  }
+  // Emit rod positions for online
+  if(mode==='online'){
+    syncTick++;
+    if(syncTick%3===0){
+      socket.emit('rod_sync',{
+        team:myTeam,
+        rods:rods.map(r=>r.yOff)
+      });
+    }
+  }
+}
+
+function updateBall(){
+  ball.vy+=ball.spin;ball.spin*=0.97;
+  ball.vx*=0.997;ball.vy*=0.997;
+  ball.x+=ball.vx;ball.y+=ball.vy;
+  if(ball.y-BR<T.y){ball.y=T.y+BR;ball.vy=Math.abs(ball.vy);}
+  if(ball.y+BR>T.y+T.h){ball.y=T.y+T.h-BR;ball.vy=-Math.abs(ball.vy);}
+  if(ball.x-BR<T.x){
+    if(ball.y>GY&&ball.y<GY+GH){
+      score[1]++;goalTeam=1;releaseTeam=1;goalAnim=120;gst='goal';
+      if(mode==='online'&&myPid===1)socket.emit('goal_sync',{score,goalTeam:1,releaseTeam:1});
+      return;
+    }else{ball.x=T.x+BR;ball.vx=Math.abs(ball.vx);}
+  }
+  if(ball.x+BR>T.x+T.w){
+    if(ball.y>GY&&ball.y<GY+GH){
+      score[0]++;goalTeam=0;releaseTeam=0;goalAnim=120;gst='goal';
+      if(mode==='online'&&myPid===1)socket.emit('goal_sync',{score,goalTeam:0,releaseTeam:0});
+      return;
+    }else{ball.x=T.x+T.w-BR;ball.vx=-Math.abs(ball.vx);}
+  }
+  rods.forEach(r=>{getFigs(r).forEach(f=>{
+    const dx=ball.x-f.x,dy=ball.y-f.y,dist=Math.hypot(dx,dy),minD=BR+FR;
+    if(dist<minD&&dist>0){
+      const nx=dx/dist,ny=dy/dist,dot=ball.vx*nx+ball.vy*ny;
+      if(dot<0){ball.vx-=2*dot*nx;ball.vy-=2*dot*ny;}
+      ball.x+=nx*(minD-dist);ball.y+=ny*(minD-dist);
+      const sp=Math.hypot(ball.vx,ball.vy);if(sp<3){ball.vx*=3/sp;ball.vy*=3/sp;}
+      capSpd();
+    }
+  });});
+  // Broadcast ball pos (only P1/host)
+  if(mode==='online'&&myPid===1&&syncTick%2===0){
+    socket.emit('ball_sync',{x:ball.x,y:ball.y,vx:ball.vx,vy:ball.vy,spin:ball.spin});
+  }
+}
+
+/* ───────────── Touch ───────────── */
+function getZone(lx,ly){
+  const h3=LH/3;
+  if(lx>=0&&lx<72)return ly<h3?'p1up':ly<h3*2?'p1kk':'p1dn';
+  if(lx>828&&lx<=LW)return ly<h3?'p2up':ly<h3*2?'p2kk':'p2dn';
+  return null;
+}
+// Online: remap zones based on which player you are
+function mapZone(z){
+  if(mode!=='online')return z;
+  // P2 online controls their team via right-side buttons mapped to p2* actions
+  // but they see left buttons as "their side"
+  if(myPid===2){
+    if(z==='p1up')return'p2up';if(z==='p1dn')return'p2dn';if(z==='p1kk')return'p2kk';
+    if(z==='p2up')return'p1up';if(z==='p2dn')return'p1dn';if(z==='p2kk')return'p1kk';
+  }
+  return z;
+}
+
+const RB=[
+  {x:175,y:250,w:160,h:85,type:'fast',icon:'⚡',label:'FAST',sub:'High speed shot',c0:'#cc6600',c1:'#773300',bdr:'#ff8800'},
+  {x:370,y:250,w:160,h:85,type:'slow',icon:'🐢',label:'SLOW',sub:'Controlled play',c0:'#006633',c1:'#003322',bdr:'#00cc55'},
+  {x:565,y:250,w:160,h:85,type:'spin',icon:'🌀',label:'SPIN',sub:'Curved path',c0:'#440099',c1:'#220055',bdr:'#8844ff'},
+];
+const MB=[
+  {x:LW/2-295,y:258,w:168,h:66,label:'👤  1 Player',a:'1p'},
+  {x:LW/2-87, y:258,w:168,h:66,label:'👥  2 Players',a:'2p'},
+  {x:LW/2+121,y:258,w:168,h:66,label:'🌐  Online',a:'online'},
+];
+
+function onTap(lx,ly){
+  if(gst==='menu'){MB.forEach(b=>{if(lx>=b.x&&lx<=b.x+b.w&&ly>=b.y&&ly<=b.y+b.h)startGame(b.a);});}
+  else if(gst==='release'){
+    const canRelease=mode!=='online'||(myPid===1&&releaseTeam===0)||(myPid===2&&releaseTeam===1);
+    if(canRelease)RB.forEach(b=>{if(lx>=b.x&&lx<=b.x+b.w&&ly>=b.y&&ly<=b.y+b.h)releaseBall(b.type);});
+  }
+  else if(gst==='gameover'){if(lx>=LW/2-115&&lx<=LW/2+115&&ly>=LH/2+62&&ly<=LH/2+116){gst='menu';mode=null;socket&&socket.disconnect();socket=null;}}
+}
+
+C.addEventListener('touchstart',e=>{
+  for(const t of e.changedTouches){
+    const[lx,ly]=s2l(t.clientX,t.clientY);onTap(lx,ly);
+    if(gst==='playing'||gst==='goal'){
+      const z=mapZone(getZone(lx,ly));
+      if(z){ts[z]=true;tMap[t.identifier]=z;}
+    }
+  }
+  e.preventDefault();},{passive:false});
+C.addEventListener('touchmove',e=>{
+  for(const t of e.changedTouches){
+    const[lx,ly]=s2l(t.clientX,t.clientY);
+    const oz=tMap[t.identifier],nz=mapZone(getZone(lx,ly));
+    if(oz&&oz!==nz){ts[oz]=false;if(nz){ts[nz]=true;tMap[t.identifier]=nz;}else delete tMap[t.identifier];}
+  }
+  e.preventDefault();},{passive:false});
+C.addEventListener('touchend',e=>{
+  for(const t of e.changedTouches){const z=tMap[t.identifier];if(z){ts[z]=false;delete tMap[t.identifier];}}
+  e.preventDefault();},{passive:false});
+C.addEventListener('click',e=>{const[lx,ly]=s2l(e.clientX,e.clientY);onTap(lx,ly);});
 document.addEventListener('keydown',e=>{
-  let action=null;
-
-  if(e.key==="w"){ paddle1-=20; action={type:'move',team:0,dir:-1}; }
-  if(e.key==="s"){ paddle1+=20; action={type:'move',team:0,dir:1}; }
-
-  if(action && socket){
-    socket.emit('input', action);
+  kd.add(e.code);
+  if(['Space','ArrowUp','ArrowDown'].includes(e.code))e.preventDefault();
+  if(gst==='release'){
+    const canRelease=mode!=='online'||(myPid===1&&releaseTeam===0)||(myPid===2&&releaseTeam===1);
+    if(canRelease){
+      if(e.code==='Digit1')releaseBall('fast');
+      if(e.code==='Digit2')releaseBall('slow');
+      if(e.code==='Digit3')releaseBall('spin');
+    }
   }
 });
+document.addEventListener('keyup',e=>kd.delete(e.code));
 
-// ================= REMOTE =================
-function applyRemoteInput(data){
-  if(data.team===1){
-    paddle2 += data.dir*20;
+/* ───────────── Draw ───────────── */
+function rrect(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);ctx.lineTo(x+w-r,y);ctx.arcTo(x+w,y,x+w,y+r,r);
+  ctx.lineTo(x+w,y+h-r);ctx.arcTo(x+w,y+h,x+w-r,y+h,r);
+  ctx.lineTo(x+r,y+h);ctx.arcTo(x,y+h,x,y+h-r,r);
+  ctx.lineTo(x,y+r);ctx.arcTo(x,y,x+r,y,r);ctx.closePath();
+}
+
+function drawTable(){
+  ctx.fillStyle='#5c3010';rrect(T.x-20,T.y-20,T.w+40,T.h+40,14);ctx.fill();
+  ctx.strokeStyle='#7a4520';ctx.lineWidth=2;ctx.stroke();
+  const felt=ctx.createLinearGradient(T.x,T.y,T.x,T.y+T.h);
+  felt.addColorStop(0,'#1a7038');felt.addColorStop(.5,'#228844');felt.addColorStop(1,'#1a7038');
+  ctx.fillStyle=felt;ctx.fillRect(T.x,T.y,T.w,T.h);
+  ctx.fillStyle='rgba(255,255,255,0.025)';
+  for(let i=0;i<T.w;i+=50)ctx.fillRect(T.x+i,T.y,25,T.h);
+  ctx.save();ctx.setLineDash([6,4]);ctx.strokeStyle='rgba(255,255,255,0.2)';ctx.lineWidth=2;
+  ctx.beginPath();ctx.moveTo(T.x+T.w/2,T.y);ctx.lineTo(T.x+T.w/2,T.y+T.h);ctx.stroke();ctx.restore();
+  ctx.strokeStyle='rgba(255,255,255,0.18)';ctx.lineWidth=2;
+  ctx.beginPath();ctx.arc(T.x+T.w/2,T.y+T.h/2,58,0,Math.PI*2);ctx.stroke();
+  const dGoal=(gx,flip)=>{
+    const gw=40,x0=flip?gx-gw:gx;
+    ctx.fillStyle='#252525';ctx.fillRect(x0,GY,gw,GH);
+    ctx.strokeStyle='#555';ctx.lineWidth=2;ctx.strokeRect(x0,GY,gw,GH);
+    ctx.strokeStyle='rgba(255,255,255,0.1)';ctx.lineWidth=1;
+    for(let y=GY;y<=GY+GH;y+=18){ctx.beginPath();ctx.moveTo(x0,y);ctx.lineTo(x0+gw,y);ctx.stroke();}
+    for(let x=x0;x<=x0+gw;x+=13){ctx.beginPath();ctx.moveTo(x,GY);ctx.lineTo(x,GY+GH);ctx.stroke();}
+  };
+  dGoal(T.x,true);dGoal(T.x+T.w,false);
+}
+
+function drawRods(){
+  rods.forEach(r=>{
+    ctx.strokeStyle='rgba(200,200,200,0.55)';ctx.lineWidth=4;
+    ctx.beginPath();ctx.moveTo(r.x,T.y-22);ctx.lineTo(r.x,T.y+T.h+22);ctx.stroke();
+    getFigs(r).forEach(f=>{
+      ctx.fillStyle='rgba(0,0,0,0.2)';ctx.beginPath();ctx.ellipse(f.x+3,f.y+4,10,14,0,0,Math.PI*2);ctx.fill();
+      const bg=ctx.createLinearGradient(f.x-11,f.y-14,f.x+11,f.y+14);
+      bg.addColorStop(0,LGHT[r.team]);bg.addColorStop(1,DRK[r.team]);
+      ctx.fillStyle=bg;ctx.beginPath();ctx.ellipse(f.x,f.y,11,14,0,0,Math.PI*2);ctx.fill();
+      ctx.strokeStyle=DRK[r.team];ctx.lineWidth=1.5;ctx.stroke();
+      ctx.fillStyle='#f5c5a0';ctx.beginPath();ctx.arc(f.x,f.y-19,7,0,Math.PI*2);ctx.fill();
+      ctx.strokeStyle=DRK[r.team];ctx.lineWidth=1;ctx.stroke();
+      ctx.fillStyle=r.team===0?'#330000':'#001144';
+      ctx.beginPath();ctx.ellipse(f.x,f.y-23,7,4.5,0,Math.PI,0);ctx.fill();
+    });
+  });
+}
+
+function drawBall(){
+  const bc=getBallColor();
+  ctx.fillStyle='rgba(0,0,0,0.18)';ctx.beginPath();ctx.ellipse(ball.x+3,ball.y+5,BR,BR*.42,0,0,Math.PI*2);ctx.fill();
+  const g=ctx.createRadialGradient(ball.x-3,ball.y-3,2,ball.x,ball.y,BR);
+  g.addColorStop(0,bc.g1);g.addColorStop(.6,bc.c);g.addColorStop(1,bc.g2);
+  ctx.fillStyle=g;ctx.beginPath();ctx.arc(ball.x,ball.y,BR,0,Math.PI*2);ctx.fill();
+  if(Math.abs(ball.spin)>0.02){
+    ctx.save();ctx.globalAlpha=Math.min(0.85,Math.abs(ball.spin)*5.5);
+    ctx.strokeStyle='rgba(255,255,255,0.8)';ctx.lineWidth=2;
+    ctx.beginPath();ctx.arc(ball.x,ball.y,BR+5,ball.spin>0?.2:Math.PI+.2,ball.spin>0?Math.PI-.2:Math.PI*2-.2);
+    ctx.stroke();ctx.restore();
+  }
+  ctx.fillStyle='rgba(255,255,255,0.3)';ctx.beginPath();ctx.ellipse(ball.x-3,ball.y-3,3.5,2.5,-.5,0,Math.PI*2);ctx.fill();
+}
+
+function drawHUD(){
+  rrect(LW/2-95,8,190,54,10);ctx.fillStyle='rgba(0,0,0,0.65)';ctx.fill();
+  ctx.strokeStyle='rgba(255,255,255,0.12)';ctx.lineWidth=1;ctx.stroke();
+  ctx.textAlign='center';ctx.font='bold 30px Arial';ctx.fillStyle='#fff';
+  ctx.fillText(`${score[0]}  :  ${score[1]}`,LW/2,48);
+  ctx.font='bold 13px Arial';
+  ctx.fillStyle=COL[0];ctx.fillText('P1',LW/2-43,48);
+  ctx.fillStyle=COL[1];ctx.fillText(mode==='1p'?'AI':mode==='online'?'P2':'P2',LW/2+43,48);
+  if(score[0]!==score[1]){
+    const bc=getBallColor();
+    ctx.fillStyle=bc.c;ctx.beginPath();ctx.arc(LW/2+(score[0]>score[1]?-105:75),18,4,0,Math.PI*2);ctx.fill();
+  }
+  // Online badge
+  if(mode==='online'){
+    rrect(LW/2-42,56,84,18,5);ctx.fillStyle='rgba(0,160,80,0.25)';ctx.fill();
+    ctx.strokeStyle='#00cc55';ctx.lineWidth=1;ctx.stroke();
+    ctx.font='10px Arial';ctx.fillStyle='#00cc55';ctx.textAlign='center';
+    ctx.fillText(`🟢 Online • You=P${myPid}`,LW/2,69);
+  }
+  [0,1].forEach(tm=>{
+    if(kCool[tm]<=0)return;if(mode==='1p'&&tm===1)return;
+    const bx=tm===0?T.x:T.x+T.w-55;
+    ctx.fillStyle='rgba(0,0,0,0.4)';ctx.fillRect(bx,T.y+T.h+8,55,6);
+    ctx.fillStyle=COL[tm];ctx.fillRect(bx,T.y+T.h+8,55*(1-kCool[tm]/22),6);
+  });
+}
+
+function drawTouchCtrl(){
+  const h3=LH/3;
+  const btns=[
+    {x:0,y:0,w:70,h:h3,lbl:'▲',tm:0,k:'p1up'},
+    {x:0,y:h3,w:70,h:h3,lbl:'⚡',tm:0,k:'p1kk'},
+    {x:0,y:h3*2,w:70,h:h3,lbl:'▼',tm:0,k:'p1dn'},
+    {x:830,y:0,w:70,h:h3,lbl:'▲',tm:1,k:'p2up'},
+    {x:830,y:h3,w:70,h:h3,lbl:'⚡',tm:1,k:'p2kk'},
+    {x:830,y:h3*2,w:70,h:h3,lbl:'▼',tm:1,k:'p2dn'},
+  ];
+  btns.forEach(b=>{
+    if(mode==='1p'&&b.tm===1)return;
+    // Online: only show relevant side
+    if(mode==='online'&&myPid===1&&b.tm===1)return;
+    if(mode==='online'&&myPid===2&&b.tm===0)return;
+    // For P2 online: render right-side buttons on left side visually
+    let rx=b.x,ry=b.y;
+    if(mode==='online'&&myPid===2&&b.tm===1){rx=0;}
+    const act=ts[b.k];
+    rrect(rx+3,ry+3,b.w-6,b.h-6,10);
+    ctx.fillStyle=act?`${COL[b.tm]}50`:'rgba(0,0,0,0.4)';ctx.fill();
+    ctx.strokeStyle=act?COL[b.tm]:'rgba(255,255,255,0.1)';ctx.lineWidth=act?2:1;ctx.stroke();
+    ctx.fillStyle=act?COL[b.tm]:'rgba(255,255,255,0.35)';
+    ctx.font=`bold ${b.lbl==='⚡'?'23':'21'}px Arial`;ctx.textAlign='center';
+    ctx.fillText(b.lbl,rx+b.w/2,ry+b.h/2+8);
+  });
+}
+
+function drawGoalAnim(){
+  const a=Math.min(1,goalAnim/35);
+  ctx.fillStyle=`rgba(255,200,0,${a*.22})`;ctx.fillRect(0,0,LW,LH);
+  ctx.save();ctx.translate(LW/2,LH/2-10);
+  const p=1+Math.sin(goalAnim*.16)*.04;ctx.scale(p,p);
+  ctx.shadowColor='#ff8800';ctx.shadowBlur=25;
+  ctx.font='bold 80px Arial';ctx.textAlign='center';ctx.fillStyle='#ffe040';
+  ctx.fillText('GOAL!',0,0);ctx.shadowBlur=0;
+  ctx.font='22px Arial';ctx.fillStyle='rgba(255,255,255,0.85)';
+  ctx.fillText(`${goalTeam===0?'P1':(mode==='1p'?'AI':'P2')} scores!`,0,42);
+  ctx.restore();
+}
+
+function drawRelease(){
+  ctx.fillStyle='rgba(0,0,0,0.72)';ctx.fillRect(0,0,LW,LH);
+  const who=releaseTeam===0?'P1':(mode==='1p'?'AI':'P2');
+  const myTurn=mode!=='online'||(myPid===1&&releaseTeam===0)||(myPid===2&&releaseTeam===1);
+  rrect(LW/2-130,148,260,38,8);
+  ctx.fillStyle=`${COL[releaseTeam]}33`;ctx.fill();
+  ctx.strokeStyle=COL[releaseTeam];ctx.lineWidth=1.5;ctx.stroke();
+  ctx.font='bold 20px Arial';ctx.fillStyle=COL[releaseTeam];ctx.textAlign='center';
+  ctx.fillText(`${who} — Choose Ball Entry Mode`,LW/2,173);
+  if(!myTurn){
+    ctx.font='16px Arial';ctx.fillStyle='rgba(255,255,255,0.5)';ctx.textAlign='center';
+    ctx.fillText(`Waiting for ${who} to pick…`,LW/2,240);
+    return;
+  }
+  ctx.font='13px Arial';ctx.fillStyle='rgba(255,255,255,0.4)';
+  ctx.fillText('How do you want to enter the ball?',LW/2,218);
+  RB.forEach((b,i)=>{
+    rrect(b.x,b.y,b.w,b.h,14);
+    const bg=ctx.createLinearGradient(b.x,b.y,b.x,b.y+b.h);
+    bg.addColorStop(0,b.c0);bg.addColorStop(1,b.c1);
+    ctx.fillStyle=bg;ctx.fill();ctx.strokeStyle=b.bdr;ctx.lineWidth=2;ctx.stroke();
+    ctx.fillStyle='#fff';ctx.font='bold 22px Arial';ctx.textAlign='center';
+    ctx.fillText(`${b.icon} ${b.label}`,b.x+b.w/2,b.y+33);
+    ctx.font='12px Arial';ctx.fillStyle='rgba(255,255,255,0.6)';
+    ctx.fillText(b.sub,b.x+b.w/2,b.y+55);
+    ctx.font='11px Arial';ctx.fillStyle='rgba(255,255,255,0.25)';
+    ctx.fillText(`[${i+1}]`,b.x+b.w/2,b.y+74);
+  });
+  if(mode==='1p'&&releaseTeam===1){
+    ctx.font='13px Arial';ctx.fillStyle='rgba(255,255,255,0.3)';ctx.textAlign='center';
+    ctx.fillText(`AI choosing in ${Math.ceil(aiTimer/60)}s…`,LW/2,382);
   }
 }
 
-// ================= START =================
-connectOnline();
+function drawWaiting(){
+  const bg=ctx.createLinearGradient(0,0,0,LH);
+  bg.addColorStop(0,'#0d0d22');bg.addColorStop(1,'#050510');
+  ctx.fillStyle=bg;ctx.fillRect(0,0,LW,LH);
+  // Spinning loader
+  const t=Date.now()/1000;
+  ctx.save();ctx.translate(LW/2,LH/2-30);
+  for(let i=0;i<8;i++){
+    const a=i*Math.PI/4+t*3,r=22;
+    const px=Math.cos(a)*r,py=Math.sin(a)*r;
+    ctx.globalAlpha=0.15+((i/8+t)%1)*.85;
+    ctx.fillStyle='#22ee77';ctx.beginPath();ctx.arc(px,py,4,0,Math.PI*2);ctx.fill();
+  }
+  ctx.restore();
+  ctx.globalAlpha=1;
+  ctx.font='bold 26px Arial';ctx.textAlign='center';ctx.fillStyle='#22ee77';
+  ctx.fillText('Waiting for opponent…',LW/2,LH/2+20);
+  ctx.font='14px Arial';ctx.fillStyle='rgba(255,255,255,0.35)';
+  ctx.fillText('Share this link with a friend to play together',LW/2,LH/2+50);
+  ctx.fillStyle='rgba(255,255,255,0.15)';ctx.font='12px Arial';
+  ctx.fillText('Room: '+roomCode,LW/2,LH/2+72);
+  rrect(LW/2-80,LH/2+92,160,40,10);ctx.fillStyle='rgba(80,0,0,0.5)';ctx.fill();
+  ctx.strokeStyle='#aa2222';ctx.lineWidth=1;ctx.stroke();
+  ctx.font='14px Arial';ctx.fillStyle='#ff6666';ctx.fillText('✕  Cancel',LW/2,LH/2+117);
+}
+// Cancel waiting tap
+const origOnTap=onTap;
 
+function drawMenu(){
+  const bg=ctx.createLinearGradient(0,0,0,LH);
+  bg.addColorStop(0,'#0d0d22');bg.addColorStop(1,'#050510');
+  ctx.fillStyle=bg;ctx.fillRect(0,0,LW,LH);
+  for(let i=0;i<80;i++){ctx.fillStyle=`rgba(255,255,255,${.08+.15*((i*31)%10)/10})`;ctx.fillRect((i*137.5)%LW,(i*91.3)%LH,1.5,1.5);}
+  ctx.save();ctx.shadowColor='#00dd66';ctx.shadowBlur=30;
+  ctx.font='bold 56px Arial';ctx.textAlign='center';ctx.fillStyle='#22ee77';
+  ctx.fillText('⚽ FOOSBALL',LW/2,168);ctx.restore();
+  ctx.font='15px Arial';ctx.fillStyle='#555';ctx.textAlign='center';
+  ctx.fillText('First to 7 goals  •  Scoring team chooses ball entry  •  Ball color = leader',LW/2,200);
+  MB.forEach(b=>{
+    rrect(b.x,b.y,b.w,b.h,12);
+    const g2=ctx.createLinearGradient(b.x,b.y,b.x,b.y+b.h);
+    const isOnline=b.a==='online';
+    g2.addColorStop(0,isOnline?'#004422':'#1e50a0');
+    g2.addColorStop(1,isOnline?'#002211':'#0e2f70');
+    ctx.fillStyle=g2;ctx.fill();
+    ctx.strokeStyle=isOnline?'#00aa44':'#3366bb';ctx.lineWidth=2;ctx.stroke();
+    ctx.font='bold 17px Arial';ctx.fillStyle='#fff';ctx.textAlign='center';
+    ctx.fillText(b.label,b.x+b.w/2,b.y+b.h/2+7);
+  });
+  const rules=[['⚡🐢🌀','3 ball entry modes'],['🔴🔵⚪','Ball = leading team color'],['📱','Touch + keyboard support'],['🌐','Online vs friend']];
+  ctx.font='13px Arial';ctx.fillStyle='rgba(255,255,255,0.3)';ctx.textAlign='center';
+  rules.forEach(([icon,text],i)=>ctx.fillText(`${icon}  ${text}`,LW/2,352+i*20));
+}
+
+function drawGameover(){
+  ctx.fillStyle='rgba(0,0,0,0.8)';ctx.fillRect(0,0,LW,LH);
+  ctx.save();ctx.shadowColor=COL[winner];ctx.shadowBlur=30;
+  ctx.font='bold 62px Arial';ctx.textAlign='center';ctx.fillStyle='#fff';
+  ctx.fillText(winner===0?'P1 Wins!':(mode==='1p'?'AI Wins!':'P2 Wins!'),LW/2,LH/2-10);
+  ctx.restore();
+  ctx.font='26px Arial';ctx.fillStyle='rgba(255,255,255,0.6)';ctx.textAlign='center';
+  ctx.fillText(`${score[0]}  —  ${score[1]}`,LW/2,LH/2+38);
+  rrect(LW/2-115,LH/2+62,230,54,12);
+  ctx.fillStyle='#1e4f9f';ctx.fill();ctx.strokeStyle='#4488cc';ctx.lineWidth=2;ctx.stroke();
+  ctx.font='bold 20px Arial';ctx.fillStyle='#fff';ctx.textAlign='center';
+  ctx.fillText('🔄  Play Again',LW/2,LH/2+95);
+}
+
+/* ───────────── Cancel waiting ───────────── */
+C.addEventListener('click',e=>{
+  if(gst==='waiting'){
+    const[lx,ly]=s2l(e.clientX,e.clientY);
+    if(lx>=LW/2-80&&lx<=LW/2+80&&ly>=LH/2+92&&ly<=LH/2+132){
+      socket&&socket.disconnect();socket=null;gst='menu';
+    }
+  }
+},{capture:true});
+
+/* ───────────── Main Loop ───────────── */
+function loop(){
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.fillStyle='#000';ctx.fillRect(0,0,cW,cH);
+  ctx.setTransform(sc,0,0,sc,ox,oy);
+
+  if(gst==='menu'){drawMenu();}
+  else if(gst==='waiting'){drawWaiting();}   // FIX #2 & #3: always render while waiting
+  else if(gst==='playing'){
+    kCool[0]=Math.max(0,kCool[0]-1);kCool[1]=Math.max(0,kCool[1]-1);
+    handleInput();
+    if(mode!=='online'||myPid===1)aiUpdate();
+    if(mode!=='online'||myPid===1)updateBall();
+    drawTable();drawRods();drawBall();drawHUD();drawTouchCtrl();
+    if(score[0]>=7||score[1]>=7){winner=score[0]>=7?0:1;gst='gameover';}
+  }
+  else if(gst==='goal'){
+    drawTable();drawRods();drawBall();drawHUD();drawTouchCtrl();drawGoalAnim();
+    goalAnim--;if(goalAnim<=0)gst='release';
+  }
+  else if(gst==='release'){
+    drawTable();drawRods();drawBall();drawHUD();drawTouchCtrl();drawRelease();
+    if(mode==='1p'&&releaseTeam===1){aiTimer--;if(aiTimer<=0){const t=['fast','slow','spin'];releaseBall(t[Math.floor(Math.random()*3)]);}}
+  }
+  else if(gst==='gameover'){drawTable();drawRods();drawHUD();drawGameover();}
+
+  requestAnimationFrame(loop);  // FIX #3: loop ALWAYS running from the start
+}
+loop();   // ← starts immediately, no waiting for socket
 </script>
 </body>
 </html>
