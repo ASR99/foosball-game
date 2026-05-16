@@ -279,15 +279,23 @@ function placeUnderGoal(gcx,joyOnLeft){
   }
   return{kick,joy};
 }
+function mobPairSpan(kick,joy){
+  return{
+    left:Math.min(kick.x,joy.cx-joy.r),
+    right:Math.max(kick.x+kick.w,joy.cx+joy.r),
+  };
+}
+/** One-pass clamp: center under goal, then fit entire pair on-screen (Y is below felt). */
 function clampMobLayout(kick,joy,goalSide){
-  const shift=(dx)=>{kick.x+=dx;joy.cx+=dx;};
-  if(goalSide==='left'){
-    if(joy.cx-joy.r<MOB_PAD_EDGE)shift(MOB_PAD_EDGE-(joy.cx-joy.r));
-    if(kick.x+kick.w>T.x-MOB_PAD_FELT)shift(T.x-MOB_PAD_FELT-(kick.x+kick.w));
-  }else{
-    if(kick.x<T.x+T.w+MOB_PAD_FELT)shift(T.x+T.w+MOB_PAD_FELT-kick.x);
-    if(joy.cx+joy.r>LW-MOB_PAD_EDGE)shift(LW-MOB_PAD_EDGE-(joy.cx+joy.r));
-  }
+  const minL=MOB_PAD_EDGE,maxR=LW-MOB_PAD_EDGE;
+  const gcx=goalCenterX(goalSide);
+  let{left,right}=mobPairSpan(kick,joy);
+  const w=right-left;
+  let targetLeft;
+  if(w>maxR-minL)targetLeft=(minL+maxR-w)*.5;
+  else targetLeft=Math.max(minL,Math.min(maxR-w,gcx-w/2));
+  const dx=targetLeft-left;
+  kick.x+=dx;joy.cx+=dx;
 }
 function buildMobLayout(team,goalSide){
   const gcx=goalCenterX(goalSide);
@@ -341,7 +349,8 @@ const MB=[
 const CHGBTN={x:LW/2-68,y:370,w:136,h:34,label:'🔄 Change Platform',c0:'#1a1a3a',c1:'#0f0f22',bdr:'rgba(255,255,255,.2)'};
 const HAND_BTN={x:LW/2-98,y:412,w:196,h:34,labelR:'🤚 Right-handed',labelL:'🤚 Left-handed',c0:'#1a2e1a',c1:'#0d180d',bdr:'#10b981'};
 const HAND_HUD={x:118,y:8,w:96,h:22,labelR:'🤚 RH',labelL:'🤚 LH'};
-const HAND_PAUSE={x:LW/2-130,y:477,w:260,h:44,labelR:'🤚 Right-handed controls',labelL:'🤚 Left-handed controls',c0:'#1a2e1a',c1:'#0d180d',bdr:'#10b981'};
+const PAUSE_BOX_TOP=132,PAUSE_BOX_PAD=14;
+const HAND_PAUSE={x:LW/2-130,y:465,w:260,h:40,labelR:'🤚 Right-handed controls',labelL:'🤚 Left-handed controls',c0:'#1a2e1a',c1:'#0d180d',bdr:'#10b981'};
 const RB=[
   {x:165,y:260,w:168,h:88,type:'fast',icon:'⚡',label:'FAST',sub:'Blazing speed',c0:'#92400e',c1:'#451a03',bdr:'#f59e0b'},
   {x:366,y:260,w:168,h:88,type:'slow',icon:'🐢',label:'SLOW',sub:'Controlled entry',c0:'#065f46',c1:'#022c22',bdr:'#10b981'},
@@ -771,8 +780,10 @@ function drawRelease(){
 }
 function drawPause(){
   ctx.fillStyle='rgba(0,0,0,.82)';ctx.fillRect(0,0,LW,LH);
-  const pauseH=platform==='mobile'?404:352;
-  rrect(LW/2-160,140,320,pauseH,18);ctx.fillStyle='rgba(10,10,30,.95)';ctx.fill();
+  const pauseH=platform==='mobile'
+    ?Math.min(HAND_PAUSE.y+HAND_PAUSE.h+PAUSE_BOX_PAD-PAUSE_BOX_TOP,LH-PAUSE_BOX_TOP-10)
+    :352;
+  rrect(LW/2-160,PAUSE_BOX_TOP,320,pauseH,18);ctx.fillStyle='rgba(10,10,30,.95)';ctx.fill();
   ctx.strokeStyle='rgba(255,255,255,.12)';ctx.lineWidth=1.5;ctx.stroke();
   ctx.font='bold 30px Arial';ctx.fillStyle='#fff';ctx.textAlign='center';
   ctx.shadowColor='rgba(255,255,255,.3)';ctx.shadowBlur=12;
