@@ -68,7 +68,7 @@ const PLAT_CARDS = [
     icon:'📱',
     label:'Mobile / Tablet',
     sub:'On-Screen Touch Controls',
-    desc:['Joystick left, kick right under goal','Default right-handed layout','Tap 🤚 to swap sides'],
+    desc:['One player per device','Joystick + kick under your goal','Online = friend on another phone'],
     c0:'#064e3b', c1:'#022c22', bdr:'#10b981', glow:'#10b981'
   }
 ];
@@ -159,6 +159,7 @@ function getBallCol(){
   return{c:'#fff',g1:'#fff',g2:'#bbb',cols:['#fff','#ddd','#aaa']};
 }
 function startGame(m){
+  if(m==='2p')return;
   if(m==='online'){connectOnline();return;}
   mode=m;score=[0,0];scoreAnim=[0,0];winner=-1;buildRods();
   ball={x:LW/2,y:LH/2,vx:0,vy:0,spin:0};releaseTeam=0;goalLock=false;aiTimer=150;fadeTo('release');
@@ -211,7 +212,7 @@ function handleInput(){
   const K=KEYS[platform]||KEYS.desktop;
   const myT=mode==='online'?(myPid===1?0:1):-1;
   const cp1=mode!=='online'||myT===0;
-  const cp2=mode==='2p'||(mode==='online'&&myT===1);
+  const cp2=mode==='online'&&myT===1;
   if(platform==='desktop'){
     if(cp1){if(kd.has(K.p1up))moveTeam(0,-1);if(kd.has(K.p1dn))moveTeam(0,1);if(kd.has(K.p1kk))tryKick(0);}
     if(cp2){if(kd.has(K.p2up))moveTeam(1,-1);if(kd.has(K.p2dn))moveTeam(1,1);if(kd.has(K.p2kk))tryKick(1);}
@@ -258,14 +259,14 @@ function updateBall(){
 
 /* ══════════════════════════════════
    MOBILE TOUCH (joystick + kick)
-   Under each goal: joystick LEFT, kick (⚡) RIGHT — opposite sides of the post.
-   Left-handed mode swaps the pair. Both sit in the row below the table.
+   1P: kick under your (left) goal, joystick under AI (right) goal.
+   Online: joy+kick paired under your goal (RH: joy left, kick right). Row below table (y≥468).
 ══════════════════════════════════ */
 const MOB_KICK_W=50,MOB_KICK_H=48,MOB_JOY_R=34,MOB_GAP=22,MOB_JOY_CY_OFF=24;
 const MOB_PAIR_W=MOB_JOY_R*2+MOB_GAP+MOB_KICK_W; // 140 — joy|gap|kick span
 const MOB_PAD_EDGE=6,MOB_PAD_FELT=10;
 function goalCenterX(goalSide){return goalSide==='left'?T.x-GOAL_W/2:T.x+T.w+GOAL_W/2;}
-/** joyOnLeft: stick under left side of goal, kick under right side (default right-handed). */
+/** joyOnLeft: joystick is the left control of the pair; else kick is left ([KICK][JOY]). */
 function placeUnderGoal(gcx,joyOnLeft){
   const kick={y:MOB_CTRL_TOP,w:MOB_KICK_W,h:MOB_KICK_H};
   const joy={cy:MOB_CTRL_TOP+MOB_JOY_CY_OFF,r:MOB_JOY_R};
@@ -285,10 +286,10 @@ function mobPairSpan(kick,joy){
     right:Math.max(kick.x+kick.w,joy.cx+joy.r),
   };
 }
-/** One-pass clamp: center under goal, then fit entire pair on-screen (Y is below felt). */
+function mobJoyOnLeft(){return dominantHand==='right';}
+/** Center pair under goal, fit on-screen. */
 function clampMobLayout(kick,joy,goalSide){
-  const minL=MOB_PAD_EDGE,maxR=LW-MOB_PAD_EDGE;
-  const gcx=goalCenterX(goalSide);
+  const minL=MOB_PAD_EDGE,maxR=LW-MOB_PAD_EDGE,gcx=goalCenterX(goalSide);
   let{left,right}=mobPairSpan(kick,joy);
   const w=right-left;
   let targetLeft;
@@ -297,17 +298,34 @@ function clampMobLayout(kick,joy,goalSide){
   const dx=targetLeft-left;
   kick.x+=dx;joy.cx+=dx;
 }
+function clampKickUnderGoal(kick,goalSide){
+  const minL=MOB_PAD_EDGE,maxR=LW-MOB_PAD_EDGE,gcx=goalCenterX(goalSide);
+  kick.x=Math.max(minL,Math.min(maxR-kick.w,gcx-kick.w/2));
+}
+function clampJoyUnderGoal(joy,goalSide){
+  const minL=MOB_PAD_EDGE,maxR=LW-MOB_PAD_EDGE,gcx=goalCenterX(goalSide);
+  let left=gcx-joy.r;
+  if(left<minL)joy.cx=minL+joy.r;
+  else if(left+joy.r*2>maxR)joy.cx=maxR-joy.r;
+  else joy.cx=gcx;
+}
+/** 1P: kick below player goal (left), joystick below AI goal (right). */
+function buildMobLayout1pSplit(){
+  const kick={y:MOB_CTRL_TOP,w:MOB_KICK_W,h:MOB_KICK_H};
+  const joy={cy:MOB_CTRL_TOP+MOB_JOY_CY_OFF,r:MOB_JOY_R};
+  clampKickUnderGoal(kick,'left');
+  clampJoyUnderGoal(joy,'right');
+  return{team:0,goalSide:'split',kick,joy};
+}
 function buildMobLayout(team,goalSide){
   const gcx=goalCenterX(goalSide);
-  const joyOnLeft=dominantHand==='right';
-  const{kick,joy}=placeUnderGoal(gcx,joyOnLeft);
+  const{kick,joy}=placeUnderGoal(gcx,mobJoyOnLeft());
   clampMobLayout(kick,joy,goalSide);
   return{team,goalSide,kick,joy};
 }
 function getActiveMobileLayouts(){
   const L=[];
-  if(mode==='1p')L.push(buildMobLayout(0,'left'));
-  else if(mode==='2p'){L.push(buildMobLayout(0,'left'));L.push(buildMobLayout(1,'right'));}
+  if(mode==='1p')L.push(buildMobLayout1pSplit());
   else if(mode==='online'){
     if(myPid===1)L.push(buildMobLayout(0,'left'));
     else if(myPid===2)L.push(buildMobLayout(1,'right'));
@@ -341,9 +359,8 @@ function hit(lx,ly,b){return lx>=b.x&&lx<=b.x+b.w&&ly>=b.y&&ly<=b.y+b.h;}
 ══════════════════════════════════ */
 const PB={x:851,y:10,w:40,h:30};
 const MB=[
-  {x:LW/2-285,y:270,w:165,h:68,label:'👤  1 Player',a:'1p',c0:'#1e3a8a',c1:'#0f1e4a',bdr:'#3b82f6'},
-  {x:LW/2-75, y:270,w:165,h:68,label:'👥  2 Players',a:'2p',c0:'#1e3a8a',c1:'#0f1e4a',bdr:'#3b82f6'},
-  {x:LW/2+135,y:270,w:165,h:68,label:'🌐  Online',a:'online',c0:'#064e3b',c1:'#022c22',bdr:'#10b981'},
+  {x:LW/2-220,y:270,w:200,h:68,label:'👤  1 Player',a:'1p',c0:'#1e3a8a',c1:'#0f1e4a',bdr:'#3b82f6'},
+  {x:LW/2+20, y:270,w:200,h:68,label:'🌐  Online (2 devices)',a:'online',c0:'#064e3b',c1:'#022c22',bdr:'#10b981'},
 ];
 // Change platform button in menu
 const CHGBTN={x:LW/2-68,y:370,w:136,h:34,label:'🔄 Change Platform',c0:'#1a1a3a',c1:'#0f0f22',bdr:'rgba(255,255,255,.2)'};
@@ -581,7 +598,7 @@ function drawDesktopLegend(){
   rrect(lx,ly,lw,lh,6);ctx.fillStyle='rgba(0,0,0,.55)';ctx.fill();
   ctx.strokeStyle='rgba(255,255,255,.08)';ctx.lineWidth=1;ctx.stroke();
   ctx.font='10px Arial';ctx.fillStyle='rgba(255,255,255,.35)';ctx.textAlign='center';
-  const p2label=mode==='1p'?'AI auto':mode==='online'?'P2: ↑↓+Enter':'P2: ↑↓+Enter';
+  const p2label=mode==='1p'?'AI auto':'Opponent device';
   ctx.fillText(`P1: W/S + Space  |  ${p2label}  |  Esc = Pause`,LW/2,ly+15);
 }
 
@@ -729,8 +746,14 @@ function drawCtrl(){
     drawMobJoystick(L);
     drawMobKick(L);
     ctx.font='9px Arial';ctx.fillStyle=COL[L.team];ctx.textAlign='center';
-    const lbl=L.team===0?'P1':(mode==='1p'?'You':'P2');
-    ctx.fillText(lbl,(L.joy.cx+L.kick.x+L.kick.w)/2,L.kick.y-8);
+    if(mode==='1p'&&L.goalSide==='split'){
+      ctx.fillText('YOU · KICK',L.kick.x+L.kick.w/2,L.kick.y-8);
+      ctx.fillStyle='rgba(255,255,255,.35)';
+      ctx.fillText('MOVE',L.joy.cx,L.kick.y-8);
+    }else{
+      const lbl=L.team===0?'P1':'P2';
+      ctx.fillText(lbl,(L.joy.cx+L.kick.x+L.kick.w)/2,L.kick.y-8);
+    }
   });
 }
 
@@ -838,11 +861,13 @@ function drawMenu(){
   // Controls reference
   if(platform==='desktop'){
     ctx.font='11px Arial';ctx.fillStyle='rgba(255,255,255,.2)';ctx.textAlign='center';
-    ctx.fillText('P1: W/S + Space  |  P2: ↑↓ + Enter  |  Esc = Pause',LW/2,420);
+    ctx.fillText('1P: W/S + Space  |  Online: 2 devices  |  Esc = Pause',LW/2,420);
   } else {
     ctx.font='11px Arial';ctx.fillStyle='rgba(255,255,255,.2)';ctx.textAlign='center';
-    const lay=dominantHand==='right'?'Joystick left · Kick right under goal':'Kick left · Joystick right under goal';
-    ctx.fillText(`${lay}  ·  Tap 🤚 RH/LH (HUD or menu) to switch`,LW/2,452);
+    const lay=mode==='1p'
+      ?'1P: ⚡ kick under your goal (left) · joystick under AI goal (right)'
+      :(dominantHand==='right'?'Online: joy left · kick right under your goal':'Online: kick left · joy right under your goal');
+    ctx.fillText(`${lay}  ·  Tap 🤚 to switch (online)`,LW/2,452);
   }
 }
 function drawWaiting(){
@@ -890,7 +915,7 @@ function loop(){
   else if(gst==='playing'){
     kCool[0]=Math.max(0,kCool[0]-1);kCool[1]=Math.max(0,kCool[1]-1);
     handleInput();
-    /* Ball sim: 1p/2p always; online only host (P1). goalLock blocks duplicate goals in all modes. */
+    /* Ball sim: 1p always; online only host (P1). goalLock blocks duplicate goals in all modes. */
     if(mode!=='online'||myPid===1){aiUpdate();updateBall();}
     tickParts();
     drawBg(false);drawTable();drawRods();drawBall();drawParts();drawHUD();drawCtrl();
